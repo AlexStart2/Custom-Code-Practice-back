@@ -1,11 +1,14 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { Document } from 'mongoose';
+import mongoose, { Document } from 'mongoose';
 
 export type UserDocument = User & Document;
 
 @Schema()
 export class User {
-    @Prop({ required: true , unique: true })
+    // @Prop({ type: mongoose.Types.ObjectId })
+    _id: string;
+
+    @Prop({ required: true, unique: true })
     email: string;
 
     @Prop({ required: true })
@@ -16,3 +19,15 @@ export class User {
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
+
+
+UserSchema.virtual('id').get(function (this: UserDocument) {
+    return this._id.toString();
+});
+
+UserSchema.set('toJSON', {
+    virtuals: true,
+});
+UserSchema.set('toObject', {
+    virtuals: true,
+});

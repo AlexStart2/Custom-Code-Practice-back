@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException, ConflictException, HttpException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
 import { UsersService } from '../users/users.service';
 import { SignUpDto } from './dto/authSignUp.dto';
 import { LoginDto } from './dto/authLogin.dto';
@@ -9,7 +9,7 @@ import { JwtService } from '@nestjs/jwt';
 export class AuthService {
     constructor(
         private readonly usersService: UsersService,
-        private jwtService: JwtService
+        private readonly jwtService: JwtService
     ) {}
 
     async signup(signUpDto: SignUpDto) {
@@ -37,14 +37,14 @@ export class AuthService {
         }
         
         const payload = {
-            // id: user._id,
+            id: user._id,
             email: user.email,
             name: user.name,
         };
 
         return {
             access_token: await this.jwtService.signAsync(payload),
-            user: payload,
+            userData: payload,
         };
     }
 }

@@ -22,3 +22,9 @@ lerna-debug.log*
 # temp directory
 .temp
 .tmp
+
+# python specific
+__pycache__/
+*.py[cod]
+.Python
+
