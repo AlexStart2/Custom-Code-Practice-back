@@ -1,7 +1,7 @@
 # uvicorn app:app --reload --host 0.0.0.0 --port 5001
 # sudo lsof /dev/nvidia-uvm
 
-from fastapi import FastAPI, UploadFile, Request
+from fastapi import FastAPI, UploadFile, Form, File    
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Depends, HTTPException, status
@@ -12,19 +12,13 @@ from jose import jwt, JWTError
 # from rq.job import Job
 import os
 from dotenv import load_dotenv
-from unstructured.partition.auto import partition
-import torch
-from sentence_transformers import SentenceTransformer
-from langchain.text_splitter import CharacterTextSplitter
-from io import BytesIO
-import httpx
+from tasks import process_and_store, run_query
+
+from db import db
+
 
 load_dotenv()
-DEVICE   = 'cuda' if torch.cuda.is_available() else 'cpu'
-ST_MODEL = SentenceTransformer(
-    'intfloat/multilingual-e5-large-instruct',
-     device=DEVICE
-)
+
 NEST_URL = os.getenv('NEST_URL')
 
 app = FastAPI()
@@ -42,8 +36,7 @@ app.add_middleware(
 
 bearer_scheme = HTTPBearer()
 JWT_SECRET = os.getenv('JWT_SECRET')
-ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
-
+ALGORITHM = os.getenv('JWT_ALGORITHM')
 
 def verify_jwt(
     creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)
@@ -69,68 +62,45 @@ def verify_jwt(
 
 
 @app.post("/upload-rag", dependencies=[Depends(verify_jwt)])
-async def rag_endpoint(files: List[UploadFile], request: Request):
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    all_results = []
-
-    for f in files:
-        # 1) Read bytes and wrap in BytesIO
-        print(f"Processing file: {f.filename}")
-        data = await f.read()
-        bio = BytesIO(data)
-
-        # 2) Partition into elements
-        elems = partition(file=bio)
-
-        for el in elems:
-            if hasattr(el, 'text'):
-                text = "\n".join(el.text for el in elems)
-            else:
-                print(el._element_id)
-
-
-
-        # 3) Split into manageable chunks
-        chunks = splitter.split_text(text)
-
-        # 4) Embed all chunks in one batch
-        embeddings = ST_MODEL.encode(
-            chunks,
-            convert_to_tensor=True,
-            normalize_embeddings=True
-        )
-        embeddings = embeddings.cpu().tolist()  # JSON‑serialize
-
-        # 5) Collect results
-        file_results = [
-            {'embedding': emb}
-            for emb in embeddings
-        ]
-
-        all_results.append({'file': f.filename, 'results': file_results})
-
-
+async def rag_endpoint(
+    datasetName: str = Form(...),
+    files: List[UploadFile] = File(...),
+    token_payload: dict = Depends(verify_jwt)
+):
     # sent the embeddings to the backend to store them in database
+    user_id = token_payload.get("id") 
+    return await process_and_store(files, dataset_name=datasetName, user_id=user_id)
 
 
-    token = request.headers["authorization"].split()[1]
 
-    return await send_to_backend(
-        token=token,
-        rag_data={ "data": all_results }
+@app.post("/models/rag-query", dependencies=[Depends(verify_jwt)])
+async def rag_query_endpoint(
+    # recieve a json with the query, datasetId, and model
+    datasetId: str = Form(...),
+    query: str = Form(...),
+    model: str = Form(...)
+):
+    """
+    Endpoint to handle RAG queries.
+    """
+
+    response = await run_query(
+        query=query,
+        model=model,
+        dataset_id=datasetId,
     )
 
+    # For now, we just return a placeholder response
+    return response
 
-async def send_to_backend(token: str, rag_data: dict):
-    """
-    Function to send embeddings to the backend service.
-    This is a placeholder and should be implemented based on your backend API.
-    """
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{NEST_URL}datasets/store-rag",
-            json=rag_data,
-            headers={"Authorization": f"Bearer {token}"}
-        )
-        response.raise_for_status()
-        return response.json()
+
+
+@app.get("/health/db")
+async def check_db():
+    try:
+        listy = db.list_collection_names()
+        print(listy)
+        return {"status": "ok", "db": "reachable"}
+    except Exception as e:
+        # If anything goes wrong, return a 503 with the error
+        raise HTTPException(status_code=503, detail=f"DB connection failed: {e}")

@@ -1,12 +1,18 @@
 import { Injectable } from '@nestjs/common';
-import { StoreRagDto } from './dto/rag_dataset.dto';
+import { Dataset } from './schemas/dataset.schema';
+import { Model } from 'mongoose';
+import { InjectModel } from '@nestjs/mongoose';
+import { DatasetsDocument } from './schemas/dataset.schema';
+
 
 @Injectable()
 export class DatasetsService {
-    async storeRagFiles(data: any[], userId: string) {
-        // Logic to handle the file upload and processing
-        // This could involve saving files, processing them, etc.
-        // For now, we will just return a mock response
-        return { success: true, message: 'Arrived here' };
+    constructor(@InjectModel(Dataset.name) private datasetModel: Model<DatasetsDocument>) {}
+
+    async getAllDatasets(UserId: string) {
+        // Search for datasets in the database using the UserId
+        const datasets = await this.datasetModel.find({ owner: UserId }).exec();
+
+        return datasets;
     }
 }

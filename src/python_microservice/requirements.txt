@@ -3,3 +3,13 @@ uvicorn
 redis
 rq
 python-dotenv
+python-jose[cryptography]
+unstructured[all-docs]
+torch
+sentence-transformers
+langchain
+langchain-community
+langchain-core
+httpx
+openai
+chromadb

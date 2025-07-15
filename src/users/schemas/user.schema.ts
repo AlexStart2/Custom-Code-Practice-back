@@ -3,7 +3,7 @@ import mongoose, { Document } from 'mongoose';
 
 export type UserDocument = User & Document;
 
-@Schema()
+@Schema({collection: 'users'})
 export class User {
     // @Prop({ type: mongoose.Types.ObjectId })
     _id: string;

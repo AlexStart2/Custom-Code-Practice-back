@@ -6,8 +6,9 @@ import { DEFAULT_ORIGIN, DEFAULT_PORT } from './app.config';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  app.enableCors({origin: DEFAULT_ORIGIN,
-    credentials: true
+  app.enableCors({
+    origin: 'http://localhost:5173',
+    credentials: true,
   });
 
   app.useGlobalPipes(new ValidationPipe({
@@ -15,7 +16,6 @@ async function bootstrap() {
     transform: true,
   })
 );
-
 
   await app.listen(process.env.PORT ?? DEFAULT_PORT);
 }

@@ -8,9 +8,7 @@ import { UsersModule } from './users/users.module';
 import { ModelsService } from './models/models.service';
 import { ModelsModule } from './models/models.module';
 import { ModelsController } from './models/models.controller';
-import { DatasetsService } from './datasets/datasets.service';
-import { DatasetsModule } from './datasets/datasets.module';
-import { DatasetsController } from './datasets/datasets.controller';
+import { DatasetsModule } from './datasets/datasets.module';  
 
 @Module({
   imports: [
@@ -21,7 +19,7 @@ import { DatasetsController } from './datasets/datasets.controller';
     ModelsModule,
     DatasetsModule
   ],
-  controllers: [AppController, ModelsController, DatasetsController],
-  providers: [AppService, ModelsService, DatasetsService],
+  controllers: [AppController, ModelsController],
+  providers: [AppService, ModelsService],
 })
 export class AppModule {}

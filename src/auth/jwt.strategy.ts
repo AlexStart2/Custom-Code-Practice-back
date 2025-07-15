@@ -15,9 +15,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 
   // This runs after the token is verified; `payload` is the decoded JWT
   async validate(payload: any) {
-    // `payload` typically contains `{ sub: userId, email, iat, exp, ... }`
-    // You can here fetch more user info or just return the payload
-    console.log('JWT Payload:', payload);
     return { userId: payload.id, email: payload.email };
   }
 }
