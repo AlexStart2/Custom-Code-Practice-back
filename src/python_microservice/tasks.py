@@ -1,13 +1,13 @@
 from unstructured.partition.auto import partition
 import torch
 from sentence_transformers import SentenceTransformer
-from langchain.text_splitter import CharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.embeddings import Embeddings
 from io import BytesIO
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import PromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.chains import create_retrieval_chain
 from langchain_core.documents import Document       
 from typing import List
@@ -18,11 +18,11 @@ import pytz
 from bson.objectid import ObjectId
 
 
+
 DEVICE   = 'cuda' if torch.cuda.is_available() else 'cpu'
-ST_MODEL = SentenceTransformer(
-    'intfloat/multilingual-e5-large-instruct',
-     device=DEVICE
-)
+
+
+
 
 
 class SentenceTransformerEmbeddings(Embeddings):
@@ -50,7 +50,11 @@ class SentenceTransformerEmbeddings(Embeddings):
         )
         return embedding.cpu().tolist()[0]
     
-EMBEDDING_MODEL = SentenceTransformerEmbeddings(ST_MODEL)
+ST_MODEL = SentenceTransformer(
+    'intfloat/multilingual-e5-large-instruct',
+    device=DEVICE
+)
+
 
 
 def rag_chain(model: str = "mistral", vector_store: Chroma = None):
@@ -83,7 +87,6 @@ def rag_chain(model: str = "mistral", vector_store: Chroma = None):
 
 
 def ask(query: str, model: str, vector_store: Chroma):
-    #
     chain = rag_chain(model=model, vector_store=vector_store)
     # invoke chain
     result = chain.invoke({"input": query})
@@ -91,26 +94,52 @@ def ask(query: str, model: str, vector_store: Chroma):
 
 
 
-async def process_and_store(
+async def process_and_store_file(
     files: List[UploadFile],
     dataset_name: str = "rag_dataset",
+    chunk_size: int = 1000,
+    chunk_overlap: int = 200,
     user_id: str = None
 ) -> dict:
-    splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    try:
+        splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    except Exception as e:
+        raise ValueError(f"Error initializing text splitter: {e}")
+    
     all_results = []
     all_documents = []
 
     for f in files:
         # 1) Read bytes and wrap in BytesIO
-        data = await f.read()
+
+        try:
+            data = await f.read()
+        except Exception as e:
+            raise ValueError(f"Error reading file {f.filename}: {e}")
+
         # 2) Partition into elements
-        elems = partition(file=BytesIO(data))
 
-        # 3) Extract text from all elements
-        text = "\n".join(el.text for el in elems if hasattr(el, 'text'))
+        try:
+            elems = partition(file=BytesIO(data), extract_images_in_pdf=True, encoding='utf-8')
+        except Exception as e:
+            raise ValueError(f"Error partitioning file {f.filename}: {e}")
 
-        # 4) Split into manageable chunks
-        chunks = splitter.split_text(text)
+        text = ""
+        try:
+            text_segments = [
+                el.text
+                for el in elems
+                if getattr(el, 'text', None)   # attribute exists
+                and isinstance(el.text, str)    # it really is a string
+                and el.text.strip()             # non‐empty after stripping
+            ]
+            text = "\n".join(text_segments)
+
+
+            # 4) Split into manageable chunks
+            chunks = splitter.split_text(text)
+        except Exception as e:
+            raise ValueError(f"Error processing text from file {f.filename}: {e}")
         
         # 5) Convert chunks to Document objects
 
@@ -119,13 +148,16 @@ async def process_and_store(
             for chunk in chunks
         ])
 
-        # 6) Embed all chunks in one batch
-        embeddings = ST_MODEL.encode(
-            chunks,
-            convert_to_tensor=True,
-            normalize_embeddings=True
-        )
-        embeddings = embeddings.cpu().tolist()  # JSON‑serialize
+        try:
+            # 6) Embed all chunks in one batch
+            embeddings = ST_MODEL.encode(
+                chunks,
+                convert_to_tensor=True,
+                normalize_embeddings=True,
+            )
+            embeddings = embeddings.cpu().tolist()  # JSON‑serialize
+        except Exception as e:
+            raise ValueError(f"Error embedding chunks from file {f.filename}: {e}")
 
         # 7) Collect results
 
@@ -136,17 +168,46 @@ async def process_and_store(
 
     
     # 8) Store all results in the database
-    db.datasets_rag.insert_one({
-        "owner": user_id,
-        "name": dataset_name,
-        "chunks": all_results,
-        "createdAt": datetime.now(pytz.utc),
-    })
-
+    try:
+        db.datasets_rag.insert_one({
+            "owner": user_id,
+            "name": dataset_name,
+            "chunks": all_results,
+            "createdAt": datetime.now(pytz.utc),
+        })
+    except Exception as e:
+        raise ValueError(f"Error storing dataset in database: {e}")
 
     return {
         'status': 'ok'
     }
+
+
+
+def process_files_job(
+    files_data: List[UploadFile],
+    dataset_name: str,
+    chunk_size: int,
+    chunk_overlap: int,
+    user_id: str,
+):
+    """
+    Synchronous function called by RQ worker.
+    - files_data: list of raw bytes
+    - files_meta: list of {filename: str}
+    """
+    # Reconstruct UploadFile-like objects if needed, or change
+    # your process_and_store to accept raw bytes+meta instead of UploadFile.
+    for file in files_data:
+        # call your existing logic file‐by‐file
+        process_and_store_file(
+            data_bytes=file,
+            dataset_name=dataset_name,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            user_id=user_id,
+        )
+    return {"status": "completed"}
 
     
 async def run_query(
@@ -174,8 +235,7 @@ async def run_query(
 
     # Create Chroma vector store with Document objects
     vector_store = Chroma(
-        embedding_function=EMBEDDING_MODEL,
-        # persist_directory="./"+dataset_id+"_chroma_db"
+        embedding_function=SentenceTransformerEmbeddings(ST_MODEL)
     )
 
     vector_store.add_texts(
