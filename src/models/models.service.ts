@@ -1,5 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import axios from 'axios';
 
 @Injectable()
 export class ModelsService {
@@ -7,25 +6,29 @@ export class ModelsService {
 
     async getAvailableModels(): Promise<string[]> {
         try {
-            // Fetch the Ollama library page
-            const response = await axios.get('https://ollama.com/library', {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
+            // run ollama list command to get available models
+            const { exec } = require('child_process');
+            return new Promise((resolve, reject) => {
+                exec('ollama list', (error: any, stdout: string, stderr: string) => {
+                    if (error) {
+                        console.error(`Error executing command: ${error.message}`);
+                        reject(error);
+                    } else if (stderr) {
+                        console.error(`Command stderr: ${stderr}`);
+                        reject(new Error(stderr));
+                    } else {
+                        
+                        // Parse the output to extract model names
+                        const models = stdout.split('\n').filter(line => line.trim() !== '').map(line => {
+                            const parts = line.split(/\s+/);
+                            return parts[0]; // Assuming the first part is the model name
+                        });
+                        resolve(models);
+
+                    }
+                });
             });
-
-            const html = response.data;
-
-            // Extract model names using regex (equivalent to grep -oP 'href="/library/\K[^"]+')
-            const modelRegex = /href="\/library\/([^"]+)"/g;
-            const models: string[] = [];
-            let match;
-
-            while ((match = modelRegex.exec(html)) !== null) {
-                models.push(match[1]);
-            }
-
-            return models;
+            
         } catch (error) {
             console.error('Error fetching available models:', error);
             throw new Error('Failed to fetch available models');

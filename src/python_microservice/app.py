@@ -9,10 +9,12 @@ from typing import List
 from jose import jwt, JWTError
 from redis import Redis   # this will be used to obtain concurent jobs for multiple requests
 from rq import Queue
-# from rq.job import Job
+from rq.job import Job
 import os
 from dotenv import load_dotenv
 from tasks import process_files_job, run_query
+import pytz
+from datetime import datetime
 
 from db import db
 
@@ -29,7 +31,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:5173'],  # your React app’s origin
+    allow_origins=['http://localhost:5173', REDIS_URL],  # your React app’s origin
     allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allow_headers=['*'],
     allow_credentials=True,
@@ -82,7 +84,40 @@ async def rag_endpoint(
             detail="User ID not found in token payload"
         )
     
-    files_data = [await f.read() for f in files]
+        # put in data base new job
+    r = db.jobs_rag.insert_one({
+        "owner": user_id,
+        "dataset_name": datasetName,
+        "status": "processing",
+        "finishedAt": None,
+        "createdAt": datetime.now(pytz.utc),
+        "error": None,
+    })
+
+    job_id = str(r.inserted_id) 
+
+    # put in data base files
+    files_job_id = db.processing_files_rag.insert_many([
+        {
+            "job_id": job_id,
+            "file_name": file.filename,
+            "status": "pending",
+            "finishedAt": None,
+            "createdAt": datetime.now(pytz.utc),
+            "error": None,
+        } for file in files
+    ])
+
+
+    files_data = []
+    for file in files:
+        file_content = await file.read()
+        files_data.append({
+            'content': file_content,
+            'filename': file.filename,
+            'content_type': file.content_type,
+            'size': file.size
+        })
 
     # Enqueue the job; it returns an RQ Job instance
     job = queue.enqueue(
@@ -92,18 +127,12 @@ async def rag_endpoint(
         chunk_size,
         chunk_overlap,
         user_id,
+        job_id,
+        files_job_id.inserted_ids,
         job_timeout="1h",   # adjust
     )
 
     return {"jobId": job.get_id(), "status": job.get_status()}  # "queued"
-    # try:
-    #     result = await process_and_store(files, dataset_name=datasetName, user_id=user_id, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    # except Exception as e:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-    #         detail=f"Error processing files: {str(e)}"
-    #     )
-    # return result
 
 
 @app.post("/models/rag-query", dependencies=[Depends(verify_jwt)])
@@ -131,3 +160,16 @@ async def rag_query_endpoint(
 
     # For now, we just return a placeholder response
     return response
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(verify_jwt)])          # ???????????
+async def get_job_status(job_id: str):
+    job = Job.fetch(job_id, connection=redis_conn)
+    return {"id": job.id, "status": job.get_status(), "result": job.result}
+
+@app.post("/jobs/{job_id}/cancel", dependencies=[Depends(verify_jwt)])
+async def cancel_job(job_id: str):
+    job = Job.fetch(job_id, connection=redis_conn)
+    job.cancel()   # will raise if already started
+    return {"id": job.id, "status": "canceled"}
+
