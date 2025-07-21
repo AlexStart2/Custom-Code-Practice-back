@@ -13,9 +13,11 @@ import { JwtStrategy }  from './jwt.strategy';
     UsersModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
-      useFactory: async () => ({
-        secret: "your_jwt_secret_key", // You can also use configService.get('JWT_SECRET') to get the secret from environment variables
-        signOptions: { expiresIn: '24h' }, // Token expiration time
+      useFactory: async (configService: ConfigService) => ({
+        secret: process.env.JWT_SECRET,
+        signOptions: { 
+          expiresIn: '24h',
+        },
       }),
       global: true,
       inject: [ConfigService],
@@ -23,6 +25,6 @@ import { JwtStrategy }  from './jwt.strategy';
   ],
   providers: [AuthService, JwtStrategy],
   controllers: [AuthController],
-  exports: [PassportModule, JwtModule]
+  exports: [AuthService, PassportModule, JwtModule]
 })
 export class AuthModule {}

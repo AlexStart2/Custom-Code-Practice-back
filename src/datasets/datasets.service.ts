@@ -1,4 +1,4 @@
-import { Injectable, HttpException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, InternalServerErrorException, ForbiddenException } from '@nestjs/common';
 import { Dataset, Job, ProcessingFile, ProcessedFile } from './schemas/dataset.schema';
 import { Model, Types } from 'mongoose';
 import { InjectModel } from '@nestjs/mongoose';
@@ -14,82 +14,77 @@ export class DatasetsService {
         @InjectModel(ProcessedFile.name) private processedFileModel: Model<ProcessedFileDocument>,
     ) {}
 
-    async getAllDatasets(UserId: string) {
-        // Search for datasets in the database using the UserId
+    async getAllDatasets(userId: string) {
+        // Search for datasets in the database using the userId
 
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new HttpException('Invalid User ID format', 400);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException('Invalid User ID format');
         }
 
-        const datasets = await this.datasetModel.find({ owner: UserId }).exec();
+        const datasets = await this.datasetModel.find({ owner: userId }).exec();
 
-        if (!datasets) {
-            throw new HttpException('No datasets found for this user', 404);
-        }
-
-        if (!datasets.some(dataset => dataset.files.length > 0)) {
-            throw new HttpException('No files found for these datasets', 404);
+        if (!datasets || datasets.length === 0) {
+            return []; // Return empty array instead of throwing error
         }
 
         return datasets;
     }
 
 
-    async deleteDataset(UserId: string, datasetId: string) {
+    async deleteDataset(userId: string, datasetId: string) {
 
         // Validate the datasetId format
         if (!Types.ObjectId.isValid(datasetId)) {
-            throw new HttpException('Invalid dataset ID format', 400);
+            throw new BadRequestException('Invalid dataset ID format');
         }
 
         // Validate the UserId format
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new HttpException('Invalid User ID format', 400);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException('Invalid User ID format');
         }
 
         // Find the dataset by ID and ensure it belongs to the user
-        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: UserId }).exec();
+        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: userId }).exec();
 
         if (!dataset) {
-            throw new HttpException('Dataset not found or does not belong to the user', 404);
+            throw new NotFoundException('Dataset not found or does not belong to the user');
         }
 
         // Delete the dataset
-        try{
+        try {
             await this.datasetModel.deleteOne({ _id: datasetId }).exec();
-        }catch (error) {
-            throw new HttpException('Error deleting dataset', 500);
+        } catch (error) {
+            throw new InternalServerErrorException('Error deleting dataset');
         }
         
         return { message: 'Dataset deleted successfully' };
     }
 
 
-    async getDatasetById(UserId: string, datasetId: string) {
-
+    async getDatasetById(userId: string, datasetId: string) {
 
         if (!Types.ObjectId.isValid(datasetId)) {
-            throw new HttpException('Invalid dataset ID format', 400);
+            throw new BadRequestException('Invalid dataset ID format');
         }
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new HttpException('Invalid User ID format', 400);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException('Invalid User ID format');
         }
 
         // Find the dataset by ID and ensure it belongs to the user
-        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: UserId }).exec();
+        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: userId }).exec();
         if (!dataset) {
-            throw new HttpException('Dataset not found or does not belong to the user', 404);
+            throw new NotFoundException('Dataset not found or does not belong to the user');
         }
 
-        let files: ProcessedFileDocument[] = [];
+        const files: ProcessedFileDocument[] = [];
 
         for (const fileId of dataset.files) {
             if (!Types.ObjectId.isValid(fileId)) {
-                throw new HttpException(`Invalid file ID format: ${fileId}`, 400);
+                throw new BadRequestException(`Invalid file ID format: ${fileId}`);
             }
             const file = await this.processedFileModel.findOne({ _id: fileId }).exec();
             if (!file) {
-                throw new HttpException(`File not found: ${fileId}`, 404);
+                throw new NotFoundException(`File not found: ${fileId}`);
             }
             files.push(file);
         }
@@ -98,93 +93,107 @@ export class DatasetsService {
     }
 
 
-    async getJobByUserId(UserId: string) {
+    async getJobByUserId(userId: string) {
         // Find the job by ID and ensure it belongs to the user
 
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new Error(`Invalid user ID format: ${UserId}`);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException(`Invalid user ID format: ${userId}`);
         }
 
-        const job = await this.jobModel.find({ owner: UserId }).exec();
+        const jobs = await this.jobModel.find({ owner: userId }).exec();
 
-        if (!job) {
-            throw new HttpException('Job not found or does not belong to the user', 404);
+        if (!jobs || jobs.length === 0) {
+            return { jobs: [], processingFiles: [] };
         }
 
+        const processingFiles: ProcessingFileDocument[] = [];
 
-        let processingFiles: ProcessingFileDocument[] = [];
-
-        for (const j of job) {
-            const files = await this.processingFileModel.find({ job_id: j._id }).exec();
+        for (const job of jobs) {
+            const files = await this.processingFileModel.find({ job_id: job._id }).exec();
             processingFiles.push(...files);
         }
 
-        if (!processingFiles) {
-            throw new HttpException('No processing files found for this job', 404);
-        }
-
-        return { job, processingFiles };
+        return { jobs, processingFiles };
     }
 
 
-    async updateDatasetName(UserId: string, datasetId: string, name: string) {
+    async updateDatasetName(userId: string, datasetId: string, name: string) {
         // Validate the datasetId format
         if (!Types.ObjectId.isValid(datasetId)) {
-            throw new HttpException('Invalid dataset ID format', 400);
+            throw new BadRequestException('Invalid dataset ID format');
         }
 
         // Validate the UserId format
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new HttpException('Invalid User ID format', 400);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException('Invalid User ID format');
+        }
+
+        // Validate the name
+        if (!name || name.trim().length === 0) {
+            throw new BadRequestException('Name cannot be empty');
         }
 
         // Find the dataset by ID and ensure it belongs to the user
-        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: UserId }).exec();
+        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: userId }).exec();
 
         if (!dataset) {
-            throw new HttpException('Dataset not found or does not belong to the user', 404);
+            throw new NotFoundException('Dataset not found or does not belong to the user');
         }
 
         // Update the dataset name
-        dataset.name = name;
+        dataset.name = name.trim();
         await dataset.save();
 
-        return { message: 'Dataset name updated successfully' };
+        return { message: 'Dataset name updated successfully', dataset: { id: dataset._id, name: dataset.name } };
     }
 
 
-    async deleteChunk(UserId: string, datasetId: string, fileId: string, idx: number) {
+    async deleteChunk(userId: string, datasetId: string, fileId: string, idx: number) {
         // Validate the datasetId format
         if (!Types.ObjectId.isValid(datasetId)) {
-            throw new HttpException('Invalid dataset ID format', 400);
+            throw new BadRequestException('Invalid dataset ID format');
         }
 
         // Validate the UserId format
-        if (!Types.ObjectId.isValid(UserId)) {
-            throw new HttpException('Invalid User ID format', 400);
+        if (!Types.ObjectId.isValid(userId)) {
+            throw new BadRequestException('Invalid User ID format');
+        }
+
+        // Validate the fileId format
+        if (!Types.ObjectId.isValid(fileId)) {
+            throw new BadRequestException('Invalid file ID format');
+        }
+
+        // Validate chunk index
+        if (idx < 0 || !Number.isInteger(idx)) {
+            throw new BadRequestException('Invalid chunk index');
         }
 
         // Find the dataset by ID and ensure it belongs to the user
-        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: UserId }).exec();
+        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: userId }).exec();
 
         if (!dataset) {
-            throw new HttpException('Dataset not found or does not belong to the user', 404);
+            throw new NotFoundException('Dataset not found or does not belong to the user');
         }
 
         // Check if the file exists in the dataset
-        if (!dataset.files.includes(fileId)) {
-            throw new HttpException('File not found in the dataset', 404);
+        const fileExists = dataset.files.some(file => file.toString() === fileId);
+        if (!fileExists) {
+            throw new NotFoundException('File not found in the dataset');
         }
 
         // Delete the chunk from the processed file
         const processedFile = await this.processedFileModel.findOne({ _id: fileId }).exec();
-        if (!processedFile || !processedFile.results || idx < 0 || idx >= processedFile.results.length) {
-            throw new HttpException('Chunk not found', 404);
+        if (!processedFile || !processedFile.results || idx >= processedFile.results.length) {
+            throw new NotFoundException('Chunk not found');
         }
 
         processedFile.results.splice(idx, 1);
         await processedFile.save();
 
-        return { message: 'Chunk deleted successfully' };
+        return { 
+            message: 'Chunk deleted successfully',
+            remainingChunks: processedFile.results.length
+        };
     }
 }

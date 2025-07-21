@@ -21,18 +21,21 @@ export class AuthService {
             throw new ConflictException('User already exists');
         }
 
-        // Hash the password
-        const hashedPassword = await bcrypt.hash(password, 12);
+        const saltRounds = process.env.NODE_ENV === 'production' ? 12 : 10;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        return this.usersService.createUser(email, hashedPassword, name);
+        const user = await this.usersService.createUser(email, hashedPassword, name);
+        
+        const { password: _, ...userWithoutPassword } = user;
+        return userWithoutPassword;
     }
 
 
-    async login(LoginDto: LoginDto){
-        const { email, password } = LoginDto;
+    async login(loginDto: LoginDto) {  // Fixed parameter name
+        const { email, password } = loginDto;
 
         const user = await this.usersService.findByEmail(email);
-        if(!user || !(await bcrypt.compare(password, user.password))) {
+        if (!user || !(await bcrypt.compare(password, user.password))) {
             throw new UnauthorizedException('Invalid email or password');
         }
         
@@ -40,11 +43,28 @@ export class AuthService {
             id: user._id,
             email: user.email,
             name: user.name,
+            iat: Math.floor(Date.now() / 1000), // Issued at time
         };
 
+        const accessToken = await this.jwtService.signAsync(payload);
+
         return {
-            access_token: await this.jwtService.signAsync(payload),
-            userData: payload,
+            access_token: accessToken,
+            userData: {
+                id: user._id,
+                email: user.email,
+                name: user.name,
+            },
+            expiresIn: '24h'
         };
+    }
+
+    // Add token validation method
+    async validateToken(token: string) {
+        try {
+            return await this.jwtService.verifyAsync(token);
+        } catch (error) {
+            throw new UnauthorizedException('Invalid token');
+        }
     }
 }

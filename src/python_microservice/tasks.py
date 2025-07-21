@@ -10,6 +10,7 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_chroma import Chroma
 from langchain.chains import create_retrieval_chain   
 from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
 from typing import List
 from fastapi import UploadFile
 from db import db
@@ -59,65 +60,7 @@ class SentenceTransformerEmbeddings(Embeddings):
 
     
 
-def rag_chain(model: str = "mistral", vector_store: Chroma = None, history: dict = None):
 
-    model = ChatOllama(model=model,)
-
-    # memory = ConversationBufferMemory(
-    #     memory_key="chat_history",    # key in the chain’s inputs/outputs
-    #     return_messages=True,
-    #     input_key="question",
-    #     output_key="answer",
-    # )
-
-    # if history:
-    #     # ConversationBufferMemory stores messages as [{"role": "user"/"assistant", "content": ...}, …]
-    #     for (q, a) in history:
-    #         memory.chat_memory.add_user_message(q)
-    #         memory.chat_memory.add_ai_message(a)
-
-
-    prompt = PromptTemplate.from_template(
-        """
-        <s> [Instructions] You are a friendly assistant. Answer the question based only on the following context. 
-        If you don't know the answer, then reply, No Context available for this question {input}. [/Instructions] </s> 
-        [Instructions] Question: {input} 
-        Context: {context} 
-        """
-    )
-
-    #Create chain
-    retriever = vector_store.as_retriever(
-        search_type="similarity_score_threshold",
-        search_kwargs={
-            "k": 1,
-            "score_threshold": 0.6,
-        },
-    )
-
-    document_chain = create_stuff_documents_chain(model, prompt)
-    chain = create_retrieval_chain(retriever, document_chain)
-    
-    #
-    return chain
-
-
-def ask(query: str, model: str, vector_store: Chroma, history: dict = None):
-    chain = rag_chain(model=model, vector_store=vector_store, history=history)
-    # invoke chain
-
-    try:
-        with torch.no_grad():
-            if torch.cuda.is_available():
-                with torch.amp.autocast('cuda'):
-                    return chain.invoke({"input": query})
-            else:
-                return chain.invoke({"input": query})
-    except Exception as e:
-        return HTTPException(
-            status_code=500,
-            detail=f"Error running query: {str(e)}"
-        )
 
 
 def embed_in_batches(texts: list[str], batch_size: int = 16) -> list[list[float]]:
@@ -333,27 +276,94 @@ async def update_text_chunk(
         )
 
 
-async def run_query(
+
+def rag_chain_history(model: str = "mistral", vector_store: Chroma = None, history_pairs: list[tuple[str, str, str]] = None):
+
+    model = ChatOllama(model=model,)
+
+    prompt = PromptTemplate.from_template(
+        """
+        <s> [Instructions] You are a friendly assistant. Answer the question based only on the following context. 
+        If you don't know the answer, then reply, No Context available for this question {input}. [/Instructions] </s> 
+        [Instructions] Question: {input} 
+        Context: {context} 
+        """
+    )
+        # 2) Seed memory
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        input_key="question",
+        output_key="answer",
+        return_messages=True,
+    )
+    for p, answer, _ in history_pairs:
+        memory.chat_memory.add_user_message(p)
+        memory.chat_memory.add_ai_message(answer)
+
+    #Create chain
+    retriever = vector_store.as_retriever(
+        search_type="similarity_score_threshold",
+        search_kwargs={
+            "k": 1,
+            "score_threshold": 0.6,
+        },
+    )
+
+    chain = create_stuff_documents_chain(model, prompt)
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=model,
+        retriever=retriever,
+        memory=memory,
+        return_source_documents=False
+    )
+
+    return chain
+
+
+def ask_history(query: str, model: str, vector_store: Chroma, history: dict = None):
+
+    history_pairs = history['messages']
+
+    chain = rag_chain_history(model=model, vector_store=vector_store, history_pairs=history_pairs)
+    # invoke chain
+
+    try:
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast('cuda'):
+                    return chain.invoke({"question": query})
+            else:
+                return chain.invoke({"question": query})
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error running query: {str(e)}"
+        )
+
+
+
+async def run_query_history(
         dataset_id: str,
         query: str,
         model: str = "mistral",
-        historyId: str = None
+        user_id: str = None
 ):
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()  # clear GPU memory
 
-        if historyId:
-            history = db.history.find_one({"_id": ObjectId(historyId)})
-            if not history:
-                raise ValueError(f"History with ID {historyId} not found")
-        else:
-            history = None
+
+        history = db.history.find_one({"owner": ObjectId(user_id)})
+        if not history:
+            raise ValueError(f"History for user {user_id} not found")
+        
+        
 
         dataset = db.datasets_rag.find_one({"_id": ObjectId(dataset_id)})
 
         if not dataset:
             raise ValueError(f"Dataset with ID {dataset_id} not found")
+
         
         files = db.processed_files.find({"_id": {"$in": dataset["files"]}})
         if not files:
@@ -365,7 +375,6 @@ async def run_query(
         texts = []
         embeddings = []
         metadatas = []
-        
 
         for file_result in files:
             filename = file_result["file_name"]
@@ -381,7 +390,6 @@ async def run_query(
         )
 
     try:
-
         # Create Chroma vector store with Document objects
         vector_store = Chroma(
             embedding_function=SentenceTransformerEmbeddings(ST_MODEL)
@@ -399,13 +407,24 @@ async def run_query(
         )
 
     try:
-        answer = ask(query=query, model=model, vector_store=vector_store, history=history)
-
-
+        answer = ask_history(query=query, model=model, vector_store=vector_store, history=history)
 
     except Exception as e:
-        return HTTPException(
-            500, f"Error running query: {str(e)}"
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error running query: {str(e)}"
         )
+
+    db.history.update_one(
+        {"owner": ObjectId(user_id)},
+        {
+            "$push": {"messages": {
+                "prompt": query,
+                "answer": answer['answer'],
+                "createdAt": datetime.now(pytz.utc)
+            }},
+            "$set": {"dataset": dataset_id, "model": model}
+        }
+    )
 
     return answer
