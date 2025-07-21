@@ -97,7 +97,10 @@ export class ProcessedFile {
     file_name: string;
 
     @Prop({required: true})
-    results: any[];
+    results: {
+        text: string;
+        embedding: number[];
+    }[];
 }
 
 export const ProcessedFileSchema = SchemaFactory.createForClass(ProcessedFile);

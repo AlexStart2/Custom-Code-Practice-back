@@ -8,8 +8,8 @@ from langchain_ollama import ChatOllama
 from langchain_core.prompts import PromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_chroma import Chroma
-from langchain.chains import create_retrieval_chain
-from langchain_core.documents import Document       
+from langchain.chains import create_retrieval_chain   
+from langchain.memory import ConversationBufferMemory
 from typing import List
 from fastapi import UploadFile
 from db import db
@@ -20,11 +20,11 @@ from fastapi import HTTPException
 
 
 
-DEVICE   = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 ST_MODEL = SentenceTransformer(
     'intfloat/multilingual-e5-large-instruct',
-    device=DEVICE
+    device='cuda' if torch.cuda.is_available() else 'cpu'
+
 )
 
 
@@ -35,11 +35,46 @@ class SentenceTransformerEmbeddings(Embeddings):
     """
     def __init__(self, model: SentenceTransformer):
         self.model = model
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """
+        Embed a list of documents (texts) using the SentenceTransformer model.
+        """
+        embeddings = self.model.encode(
+            texts,
+            convert_to_tensor=True,
+            normalize_embeddings=True,
+        )
+        return embeddings.cpu().tolist()
+    def embed_query(self, text: str) -> List[float]:
+        """
+        Embed a single query (text) using the SentenceTransformer model.
+        """
+        embedding = self.model.encode(
+            text,
+            convert_to_tensor=True,
+            normalize_embeddings=True,
+        )
+        return embedding.cpu().tolist()
+
     
 
-def rag_chain(model: str = "mistral", vector_store: Chroma = None):
+def rag_chain(model: str = "mistral", vector_store: Chroma = None, history: dict = None):
 
-    model = ChatOllama(model=model)
+    model = ChatOllama(model=model,)
+
+    # memory = ConversationBufferMemory(
+    #     memory_key="chat_history",    # key in the chain’s inputs/outputs
+    #     return_messages=True,
+    #     input_key="question",
+    #     output_key="answer",
+    # )
+
+    # if history:
+    #     # ConversationBufferMemory stores messages as [{"role": "user"/"assistant", "content": ...}, …]
+    #     for (q, a) in history:
+    #         memory.chat_memory.add_user_message(q)
+    #         memory.chat_memory.add_ai_message(a)
 
 
     prompt = PromptTemplate.from_template(
@@ -67,16 +102,20 @@ def rag_chain(model: str = "mistral", vector_store: Chroma = None):
     return chain
 
 
-def ask(query: str, model: str, vector_store: Chroma):
-    chain = rag_chain(model=model, vector_store=vector_store)
+def ask(query: str, model: str, vector_store: Chroma, history: dict = None):
+    chain = rag_chain(model=model, vector_store=vector_store, history=history)
     # invoke chain
 
     try:
-        result = chain.invoke({"input": query})
-        return result
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.amp.autocast('cuda'):
+                    return chain.invoke({"input": query})
+            else:
+                return chain.invoke({"input": query})
     except Exception as e:
         return HTTPException(
-            status_code=501,
+            status_code=500,
             detail=f"Error running query: {str(e)}"
         )
 
@@ -256,32 +295,85 @@ async def process_files_job(
 
     return {"jobId": job_id, "status": final_status}
 
-    
+
+async def update_text_chunk(
+    file_id: str,
+    chunk_index: int,
+    text: str
+):
+    """
+    Update a specific chunk of a file in a dataset.
+    """
+
+
+    # Calculate the embedding again for the new text
+    try:
+        embedding = embed_in_batches([text])[0]
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculating embedding: {str(e)}"
+        )
+
+    res = db.processed_files.update_one(
+        {"_id": ObjectId(file_id)},
+        {
+            "$set": {
+                f"results.{chunk_index}.text": text,
+                f"results.{chunk_index}.embedding": embedding,
+            }
+        }
+    )
+
+    if res.modified_count == 0:
+        raise HTTPException(
+            status_code=404,
+            detail="Chunk not found"
+        )
+
+
 async def run_query(
         dataset_id: str,
         query: str,
-        model: str = "mistral"
+        model: str = "mistral",
+        historyId: str = None
 ):
     try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()  # clear GPU memory
 
+        if historyId:
+            history = db.history.find_one({"_id": ObjectId(historyId)})
+            if not history:
+                raise ValueError(f"History with ID {historyId} not found")
+        else:
+            history = None
+
         dataset = db.datasets_rag.find_one({"_id": ObjectId(dataset_id)})
 
         if not dataset:
             raise ValueError(f"Dataset with ID {dataset_id} not found")
-                
+        
+        files = db.processed_files.find({"_id": {"$in": dataset["files"]}})
+        if not files:
+            raise ValueError(f"No files found for dataset with ID {dataset_id}")
+        
+        files = list(files)
+    
         # Extract texts and embeddings from stored data
         texts = []
         embeddings = []
         metadatas = []
         
-        for file_result in dataset["chunks"]:
-            filename = file_result["file"]
+
+        for file_result in files:
+            filename = file_result["file_name"]
             for chunk_data in file_result["results"]:
                 texts.append(chunk_data["text"])
                 embeddings.append(chunk_data["embedding"])
                 metadatas.append({"source": filename})
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -307,7 +399,10 @@ async def run_query(
         )
 
     try:
-        answer = ask(query=query, model=model, vector_store=vector_store)
+        answer = ask(query=query, model=model, vector_store=vector_store, history=history)
+
+
+
     except Exception as e:
         return HTTPException(
             500, f"Error running query: {str(e)}"

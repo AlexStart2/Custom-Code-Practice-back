@@ -1,5 +1,4 @@
 # uvicorn app:app --reload --host 0.0.0.0 --port 5001
-# sudo lsof /dev/nvidia-uvm
 
 from fastapi import FastAPI, UploadFile, Form, File    
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,14 +8,13 @@ from typing import List
 from jose import jwt, JWTError
 from redis import Redis   # this will be used to obtain concurent jobs for multiple requests
 from rq import Queue
-from rq.job import Job
 import os
 from dotenv import load_dotenv
-from tasks import process_files_job, run_query
+from tasks import process_files_job, run_query, update_text_chunk
 import pytz
 from datetime import datetime
-
 from db import db
+from bson import ObjectId
 
 
 load_dotenv()
@@ -29,10 +27,24 @@ NEST_URL = os.getenv('NEST_URL')
 
 app = FastAPI()
 
+models = []
+
+# get the list of models from the ollama list command
+try:
+    import subprocess
+    result = subprocess.run(['ollama', 'list'], capture_output=True, text=True)
+    if result.returncode == 0:
+        models = [line.split()[0] for line in result.stdout.strip().split('\n') if line]
+    else:
+        print(f"Error fetching models: {result.stderr}")
+except FileNotFoundError:
+    print("Ollama CLI not found. Ensure it is installed and in your PATH.")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['http://localhost:5173', REDIS_URL],  # your React app’s origin
-    allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allow_methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allow_headers=['*'],
     allow_credentials=True,
 )
@@ -83,30 +95,56 @@ async def rag_endpoint(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User ID not found in token payload"
         )
+    if not datasetName or not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dataset name and files are required"
+        )
+
+    user = db.users.find_one({"_id": ObjectId(user_id)})
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
     
-        # put in data base new job
-    r = db.jobs_rag.insert_one({
-        "owner": user_id,
-        "dataset_name": datasetName,
-        "status": "processing",
-        "finishedAt": None,
-        "createdAt": datetime.now(pytz.utc),
-        "error": None,
-    })
+    if chunk_size <= 10 or chunk_overlap < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid chunk size or overlap"
+        )
 
-    job_id = str(r.inserted_id) 
+    # put in data base new job
 
-    # put in data base files
-    files_job_id = db.processing_files_rag.insert_many([
-        {
-            "job_id": job_id,
-            "file_name": file.filename,
-            "status": "pending",
+    try:
+        r = db.jobs_rag.insert_one({
+            "owner": user_id,
+            "dataset_name": datasetName,
+            "status": "processing",
             "finishedAt": None,
             "createdAt": datetime.now(pytz.utc),
             "error": None,
-        } for file in files
-    ])
+        })
+
+        job_id = str(r.inserted_id) 
+
+        # put in data base files
+        files_job_id = db.processing_files_rag.insert_many([
+            {
+                "job_id": job_id,
+                "file_name": file.filename,
+                "status": "pending",
+                "finishedAt": None,
+                "createdAt": datetime.now(pytz.utc),
+                "error": None,
+            } for file in files
+        ])
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error inserting job into database: {str(e)}"
+        )
 
 
     files_data = []
@@ -140,17 +178,42 @@ async def rag_query_endpoint(
     # recieve a json with the query, datasetId, and model
     datasetId: str = Form(...),
     query: str = Form(...),
-    model: str = Form(...)
+    model: str = Form(...),
+    # optional historyId for conversation context
+    historyId: str = Form(None)
 ):
     """
     Endpoint to handle RAG queries.
     """
+
+    if not datasetId or not query or not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dataset, query, and model are required"
+        )
+
+    dataset = db.datasets_rag.find_one({"_id": ObjectId(datasetId)})
+    if not dataset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dataset not found"
+        )
+    
+    # Validate the model
+    if model not in models[1:]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Model '{model}' is not available"
+        )
+
 
     try:
         response = await run_query(
             query=query,
             model=model,
             dataset_id=datasetId,
+            historyId=historyId
+
         )
     except Exception as e:
         raise HTTPException(
@@ -162,14 +225,48 @@ async def rag_query_endpoint(
     return response
 
 
-@app.get("/jobs/{job_id}", dependencies=[Depends(verify_jwt)])          # ???????????
-async def get_job_status(job_id: str):
-    job = Job.fetch(job_id, connection=redis_conn)
-    return {"id": job.id, "status": job.get_status(), "result": job.result}
+@app.patch("/datasets/files/chunks/", dependencies=[Depends(verify_jwt)])
+async def update_chunk(
+    fileId: str = Form(...),
+    idx: str = Form(...),
+    text: str = Form(...)
+):
+    """
+    Endpoint to update a chunk of a file in a dataset.
+    """
 
-@app.post("/jobs/{job_id}/cancel", dependencies=[Depends(verify_jwt)])
-async def cancel_job(job_id: str):
-    job = Job.fetch(job_id, connection=redis_conn)
-    job.cancel()   # will raise if already started
-    return {"id": job.id, "status": "canceled"}
+    if not fileId or not idx or not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file, idx, and text are required"
+        )
+    
+    file = db.processed_files.find_one({"_id": ObjectId(fileId)})
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    try:
+        # Call the actual update_chunk function from tasks.py
+        result = await update_text_chunk(
+            file_id=fileId,
+            chunk_index=int(idx),
+            text=text,
+        )
+        
+        return {
+            "message": "Chunk updated successfully",
+            "fileId": fileId,
+            "chunkIndex": idx,
+            "text": text,
+            "result": result
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating chunk: {str(e)}"
+        )
 

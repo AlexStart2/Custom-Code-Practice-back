@@ -151,4 +151,40 @@ export class DatasetsService {
 
         return { message: 'Dataset name updated successfully' };
     }
+
+
+    async deleteChunk(UserId: string, datasetId: string, fileId: string, idx: number) {
+        // Validate the datasetId format
+        if (!Types.ObjectId.isValid(datasetId)) {
+            throw new HttpException('Invalid dataset ID format', 400);
+        }
+
+        // Validate the UserId format
+        if (!Types.ObjectId.isValid(UserId)) {
+            throw new HttpException('Invalid User ID format', 400);
+        }
+
+        // Find the dataset by ID and ensure it belongs to the user
+        const dataset = await this.datasetModel.findOne({ _id: datasetId, owner: UserId }).exec();
+
+        if (!dataset) {
+            throw new HttpException('Dataset not found or does not belong to the user', 404);
+        }
+
+        // Check if the file exists in the dataset
+        if (!dataset.files.includes(fileId)) {
+            throw new HttpException('File not found in the dataset', 404);
+        }
+
+        // Delete the chunk from the processed file
+        const processedFile = await this.processedFileModel.findOne({ _id: fileId }).exec();
+        if (!processedFile || !processedFile.results || idx < 0 || idx >= processedFile.results.length) {
+            throw new HttpException('Chunk not found', 404);
+        }
+
+        processedFile.results.splice(idx, 1);
+        await processedFile.save();
+
+        return { message: 'Chunk deleted successfully' };
+    }
 }
