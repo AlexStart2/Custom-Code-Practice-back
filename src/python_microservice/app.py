@@ -388,14 +388,6 @@ async def update_file_chunk(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="File not found"
             )
-        
-        # Check if user owns the file (through dataset ownership)
-        dataset = db.datasets_rag.find_one({"_id": file_record.get("dataset_id")})
-        if not dataset or str(dataset.get("owner")) != user_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied - you don't own this file"
-            )
             
     except HTTPException:
         raise
@@ -404,9 +396,9 @@ async def update_file_chunk(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Database error while checking file: {str(e)}"
         )
-    
+    print(file_record['file_name'])
+    chunk_count = len(file_record.get("results", []))
     # Validate chunk index against file's chunk count
-    chunk_count = file_record.get("chunk_count", 0)
     if chunk_index >= chunk_count:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -44,6 +44,38 @@ $ npm run start:dev
 $ npm run start:prod
 ```
 
+## Python Microservice Setup
+
+```bash
+# Install Ollama (Linux/macOS)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Download models (example: llama2, mistral)
+ollama pull llama2
+ollama pull mistral
+
+# Create and activate Python virtual environment
+cd python_microservice
+python3 -m venv venv
+source venv/bin/activate
+
+# Install required Python packages
+pip install -r requirements.txt
+
+# Create a mongo database named 'trainify'
+
+# Run the Python server
+uvicorn app:app --reload --host 0.0.0.0 --port 5001
+
+#start redis server
+sudo systemctl start redis-server
+
+# Start RQ worker for background jobs
+rq worker rag-jobs
+```
+
+
+
 ## Run tests
 
 ```bash
